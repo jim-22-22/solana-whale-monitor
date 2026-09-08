@@ -9,51 +9,59 @@ HEADERS = {
     "x-chain": "solana"
 }
 
+seen_tokens = set()
 
-def check_birdeye():
-    url = "https://public-api.birdeye.so/defi/tokenlist"
+CHECK_EVERY_SECONDS = 30
+
+
+def check_new_tokens():
+    url = "https://public-api.birdeye.so/defi/v2/tokens/new_listing"
 
     try:
         response = requests.get(
             url,
             headers=HEADERS,
             params={
-                "sort_by": "v24hUSD",
-                "sort_type": "desc",
-                "offset": 0,
-                "limit": 10
+                "limit": 20,
+                "meme_platform_enabled": "true"
             },
             timeout=20
         )
 
+        print("Birdeye status:", response.status_code)
         response.raise_for_status()
+
         data = response.json()
+        tokens = data.get("data", {}).get("items", [])
 
-        print("Birdeye connection OK")
-
-        tokens = data.get("data", {}).get("tokens", [])
+        print("New listings received:", len(tokens))
 
         for token in tokens:
-            symbol = token.get("symbol", "UNKNOWN")
             address = token.get("address", "")
-            price = token.get("price", 0)
-            liquidity = token.get("liquidity", 0)
-            volume = token.get("v24hUSD", 0)
 
-            print(
-                f"{symbol} | "
-                f"Price: {price} | "
-                f"Liquidity: {liquidity} | "
-                f"24h Volume: {volume} | "
-                f"Address: {address}"
-            )
+            if not address or address in seen_tokens:
+                continue
+
+            seen_tokens.add(address)
+
+            name = token.get("name", "UNKNOWN")
+            symbol = token.get("symbol", "UNKNOWN")
+            liquidity = token.get("liquidity", 0)
+
+            print("")
+            print("NEW TOKEN DETECTED")
+            print("Name:", name)
+            print("Symbol:", symbol)
+            print("Liquidity:", liquidity)
+            print("Address:", address)
+            print("")
 
     except Exception as e:
-        print(f"Birdeye error: {e}")
+        print("Birdeye error:", e)
 
 
-print("Solana token monitor started")
+print("Solana NEW TOKEN monitor started")
 
 while True:
-    check_birdeye()
-    time.sleep(60)
+    check_new_tokens()
+    time.sleep(CHECK_EVERY_SECONDS)

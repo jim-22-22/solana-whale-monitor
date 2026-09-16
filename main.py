@@ -1,140 +1,156 @@
-import os
 import time
+from datetime import datetime, timezone
 import requests
 
-BIRDEYE_API_KEY = os.getenv("BIRDEYE_API_KEY")
+# ==========================================
+# SOLANA EARLY MOMENTUM MONITOR
+# Source: GeckoTerminal
+# ==========================================
+
+URL = "https://api.geckoterminal.com/api/v2/networks/solana/new_pools"
 
 HEADERS = {
-    "X-API-KEY": BIRDEYE_API_KEY,
-    "x-chain": "solana"
+    "Accept": "application/json;version=20230203"
 }
 
 CHECK_INTERVAL = 60
-REQUEST_DELAY = 2
 
-MIN_LIQUIDITY = 3000
-MAX_MARKET_CAP = 500000
-MAX_TOKENS_PER_CYCLE = 5
+# ---- FILTERS ----
 
-seen_tokens = set()
+MAX_AGE_MINUTES = 15
+
+MIN_LIQUIDITY = 2000
+MAX_LIQUIDITY = 100000
+
+MIN_FDV = 1000
+MAX_FDV = 1000000
+
+MIN_VOLUME_5M = 500
+
+MIN_TRADES_5M = 5
+
+seen_pools = set()
 
 
-def birdeye_get(url, params=None):
+def safe_float(value):
     try:
+        return float(value or 0)
+    except:
+        return 0
+
+
+def safe_int(value):
+    try:
+        return int(value or 0)
+    except:
+        return 0
+
+
+def get_new_pools():
+
+    try:
+
         response = requests.get(
-            url,
+            URL,
             headers=HEADERS,
-            params=params,
+            params={
+                "include": "base_token,quote_token,dex",
+                "page": 1
+            },
             timeout=20
         )
 
-        print("Birdeye status:", response.status_code)
-
-        if response.status_code == 429:
-            print("Birdeye rate limit reached. Waiting...")
-            time.sleep(30)
-            return None
+        print("GeckoTerminal status:", response.status_code)
 
         if response.status_code != 200:
-            print("Birdeye request error:", response.status_code)
+            print("GeckoTerminal error:")
             print(response.text[:500])
             return None
 
         return response.json()
 
     except Exception as e:
-        print("Birdeye request error:", e)
+
+        print("GeckoTerminal request error:", e)
+
         return None
 
 
-def get_token_overview(address):
-    url = "https://public-api.birdeye.so/defi/token_overview"
+def pool_age_minutes(created_at):
 
-    data = birdeye_get(
-        url,
-        {
-            "address": address
-        }
-    )
+    try:
 
-    time.sleep(REQUEST_DELAY)
+        created = datetime.fromisoformat(
+            created_at.replace("Z", "+00:00")
+        )
 
-    if not data:
-        return None
+        now = datetime.now(timezone.utc)
 
-    return data.get("data", {})
+        return (now - created).total_seconds() / 60
+
+    except:
+
+        return 999999
 
 
-def calculate_score(token):
+def calculate_score(
+    age,
+    liquidity,
+    fdv,
+    volume,
+    buys,
+    sells
+):
+
     score = 0
 
-    liquidity = float(token.get("liquidity") or 0)
-    market_cap = float(
-        token.get("marketCap")
-        or token.get("mc")
-        or 0
-    )
+    trades = buys + sells
 
-    volume_5m = float(
-        token.get("v5mUSD")
-        or token.get("volume5m")
-        or 0
-    )
+    # AGE
+    if age <= 3:
+        score += 3
+    elif age <= 7:
+        score += 2
+    elif age <= 15:
+        score += 1
 
-    trades_5m = int(
-        token.get("trade5m")
-        or token.get("trades5m")
-        or 0
-    )
-
-    buys_5m = int(
-        token.get("buy5m")
-        or token.get("buys5m")
-        or 0
-    )
-
-    sells_5m = int(
-        token.get("sell5m")
-        or token.get("sells5m")
-        or 0
-    )
-
-    # Liquidity
+    # LIQUIDITY
     if liquidity >= 10000:
         score += 2
     elif liquidity >= 5000:
         score += 1
 
-    # Small market cap
-    if 0 < market_cap <= 100000:
+    # SMALL FDV / EARLY PROJECT
+    if 0 < fdv <= 100000:
         score += 2
-    elif market_cap <= 500000:
+    elif fdv <= 500000:
         score += 1
 
-    # Early volume
-    if volume_5m >= 10000:
+    # VOLUME 5M
+    if volume >= 10000:
         score += 3
-    elif volume_5m >= 5000:
+    elif volume >= 3000:
         score += 2
-    elif volume_5m >= 1000:
+    elif volume >= 500:
         score += 1
 
-    # Trading activity
-    if trades_5m >= 50:
+    # NUMBER OF TRADES
+    if trades >= 50:
         score += 2
-    elif trades_5m >= 20:
+    elif trades >= 20:
         score += 1
 
-    # Buy pressure
-    total = buys_5m + sells_5m
+    # BUY PRESSURE
+    if trades > 0:
 
-    if total > 0:
-        buy_ratio = buys_5m / total
+        buy_ratio = buys / trades
 
         if buy_ratio >= 0.70:
             score += 3
+
         elif buy_ratio >= 0.60:
             score += 2
+
         elif buy_ratio >= 0.55:
             score += 1
 
@@ -142,122 +158,209 @@ def calculate_score(token):
 
 
 def score_label(score):
-    if score >= 9:
-        return "🔥 VERY HIGH MOMENTUM"
 
-    if score >= 7:
-        return "🚀 HIGH MOMENTUM"
+    if score >= 11:
+        return "🔥🔥 EXTREME EARLY MOMENTUM"
+
+    if score >= 8:
+        return "🚀 HIGH EARLY MOMENTUM"
 
     if score >= 5:
-        return "👀 MEDIUM MOMENTUM"
+        return "👀 EARLY WATCH"
 
     return "LOW SIGNAL"
 
 
-def check_new_tokens():
-    url = "https://public-api.birdeye.so/defi/v2/tokens/new_listing"
+def monitor():
 
-    # Keep this request minimal.
-    # meme_platform_enabled was removed because it was
-    # causing Birdeye to reject the request with HTTP 400.
-    data = birdeye_get(
-        url,
-        {
-            "limit": 20
-        }
-    )
+    data = get_new_pools()
 
     if not data:
         return
 
-    tokens = data.get("data", {}).get("items", [])
+    pools = data.get("data", [])
 
-    print("New listings received:", len(tokens))
+    print("New pools received:", len(pools))
 
-    new_tokens = []
+    for pool in pools:
 
-    for token in tokens:
-        address = token.get("address", "")
+        attributes = pool.get("attributes", {})
 
-        if not address or address in seen_tokens:
+        pool_address = attributes.get("address", "")
+
+        if not pool_address:
             continue
 
-        seen_tokens.add(address)
-        new_tokens.append(token)
-
-    print("New tokens:", len(new_tokens))
-
-    for token in new_tokens[:MAX_TOKENS_PER_CYCLE]:
-
-        address = token.get("address", "")
-        name = token.get("name", "UNKNOWN")
-        symbol = token.get("symbol", "UNKNOWN")
-
-        overview = get_token_overview(address)
-
-        if not overview:
+        if pool_address in seen_pools:
             continue
 
-        liquidity = float(overview.get("liquidity") or 0)
+        seen_pools.add(pool_address)
 
-        market_cap = float(
-            overview.get("marketCap")
-            or overview.get("mc")
-            or 0
+        name = attributes.get("name", "UNKNOWN")
+
+        created_at = attributes.get(
+            "pool_created_at",
+            ""
         )
+
+        age = pool_age_minutes(created_at)
+
+        # Ignore older pools
+        if age > MAX_AGE_MINUTES:
+            continue
+
+        liquidity = safe_float(
+            attributes.get("reserve_in_usd")
+        )
+
+        fdv = safe_float(
+            attributes.get("fdv_usd")
+        )
+
+        market_cap = safe_float(
+            attributes.get("market_cap_usd")
+        )
+
+        volume_data = attributes.get(
+            "volume_usd",
+            {}
+        )
+
+        volume_5m = safe_float(
+            volume_data.get("m5")
+        )
+
+        tx_data = attributes.get(
+            "transactions",
+            {}
+        )
+
+        tx_5m = tx_data.get(
+            "m5",
+            {}
+        )
+
+        buys = safe_int(
+            tx_5m.get("buys")
+        )
+
+        sells = safe_int(
+            tx_5m.get("sells")
+        )
+
+        trades = buys + sells
+
+        # BASIC QUALITY FILTERS
 
         if liquidity < MIN_LIQUIDITY:
             continue
 
-        if market_cap > MAX_MARKET_CAP:
+        if liquidity > MAX_LIQUIDITY:
             continue
 
-        score = calculate_score(overview)
+        if fdv > MAX_FDV:
+            continue
+
+        if fdv > 0 and fdv < MIN_FDV:
+            continue
+
+        if volume_5m < MIN_VOLUME_5M:
+            continue
+
+        if trades < MIN_TRADES_5M:
+            continue
+
+        score = calculate_score(
+            age,
+            liquidity,
+            fdv,
+            volume_5m,
+            buys,
+            sells
+        )
+
         signal = score_label(score)
 
-        volume_5m = float(
-            overview.get("v5mUSD")
-            or overview.get("volume5m")
-            or 0
-        )
+        buy_ratio = 0
 
-        trades_5m = int(
-            overview.get("trade5m")
-            or overview.get("trades5m")
-            or 0
-        )
-
-        buys_5m = int(
-            overview.get("buy5m")
-            or overview.get("buys5m")
-            or 0
-        )
-
-        sells_5m = int(
-            overview.get("sell5m")
-            or overview.get("sells5m")
-            or 0
-        )
+        if trades > 0:
+            buy_ratio = (buys / trades) * 100
 
         print("")
-        print("================================")
+        print("========================================")
         print(signal)
-        print("EARLY TOKEN WATCH")
-        print("Score:", score)
-        print("Name:", name)
-        print("Symbol:", symbol)
-        print("Liquidity: $", round(liquidity, 2))
-        print("Market Cap: $", round(market_cap, 2))
-        print("Volume 5m: $", round(volume_5m, 2))
-        print("Trades 5m:", trades_5m)
-        print("Buys/Sells 5m:", buys_5m, "/", sells_5m)
-        print("Address:", address)
-        print("================================")
+        print("========================================")
+
+        print("Pool:", name)
+
+        print(
+            "Age:",
+            round(age, 1),
+            "minutes"
+        )
+
+        print(
+            "Liquidity: $",
+            round(liquidity, 2)
+        )
+
+        print(
+            "Market Cap: $",
+            round(market_cap, 2)
+        )
+
+        print(
+            "FDV: $",
+            round(fdv, 2)
+        )
+
+        print(
+            "Volume 5m: $",
+            round(volume_5m, 2)
+        )
+
+        print(
+            "Trades 5m:",
+            trades
+        )
+
+        print(
+            "Buys/Sells:",
+            buys,
+            "/",
+            sells
+        )
+
+        print(
+            "Buy pressure:",
+            round(buy_ratio, 1),
+            "%"
+        )
+
+        print(
+            "MOMENTUM SCORE:",
+            score
+        )
+
+        print(
+            "Pool address:",
+            pool_address
+        )
+
+        print("========================================")
         print("")
 
 
-print("Solana EARLY MOMENTUM SCORE monitor started")
+print("")
+print("========================================")
+print("SOLANA EARLY MOMENTUM MONITOR STARTED")
+print("Source: GeckoTerminal")
+print("Checking new pools every 60 seconds")
+print("========================================")
+print("")
 
 while True:
-    check_new_tokens()
+
+    monitor()
+
     time.sleep(CHECK_INTERVAL)

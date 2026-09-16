@@ -9,14 +9,14 @@ HEADERS = {
     "x-chain": "solana"
 }
 
-seen_tokens = set()
-
-CHECK_EVERY_SECONDS = 60
-DELAY_BETWEEN_REQUESTS = 2
-MAX_TOKENS_TO_ANALYZE = 5
+CHECK_INTERVAL = 60
+REQUEST_DELAY = 2
 
 MIN_LIQUIDITY = 3000
 MAX_MARKET_CAP = 500000
+MAX_TOKENS_PER_CYCLE = 5
+
+seen_tokens = set()
 
 
 def birdeye_get(url, params=None):
@@ -28,12 +28,18 @@ def birdeye_get(url, params=None):
             timeout=20
         )
 
+        print("Birdeye status:", response.status_code)
+
         if response.status_code == 429:
-            print("Rate limit 429 - waiting 15 seconds...")
-            time.sleep(15)
+            print("Birdeye rate limit reached. Waiting...")
+            time.sleep(30)
             return None
 
-        response.raise_for_status()
+        if response.status_code != 200:
+            print("Birdeye request error:", response.status_code)
+            print(response.text[:500])
+            return None
+
         return response.json()
 
     except Exception as e:
@@ -46,8 +52,12 @@ def get_token_overview(address):
 
     data = birdeye_get(
         url,
-        {"address": address}
+        {
+            "address": address
+        }
     )
+
+    time.sleep(REQUEST_DELAY)
 
     if not data:
         return None
@@ -55,91 +65,105 @@ def get_token_overview(address):
     return data.get("data", {})
 
 
-def calculate_score(liquidity, market_cap, volume_5m,
-                    trades_5m, buys_5m, sells_5m):
-
+def calculate_score(token):
     score = 0
 
-    # LIQUIDITY - max 20
-    if liquidity >= 25000:
-        score += 20
-    elif liquidity >= 10000:
-        score += 15
+    liquidity = float(token.get("liquidity") or 0)
+    market_cap = float(
+        token.get("marketCap")
+        or token.get("mc")
+        or 0
+    )
+
+    volume_5m = float(
+        token.get("v5mUSD")
+        or token.get("volume5m")
+        or 0
+    )
+
+    trades_5m = int(
+        token.get("trade5m")
+        or token.get("trades5m")
+        or 0
+    )
+
+    buys_5m = int(
+        token.get("buy5m")
+        or token.get("buys5m")
+        or 0
+    )
+
+    sells_5m = int(
+        token.get("sell5m")
+        or token.get("sells5m")
+        or 0
+    )
+
+    # Liquidity
+    if liquidity >= 10000:
+        score += 2
     elif liquidity >= 5000:
-        score += 10
-    elif liquidity >= 3000:
-        score += 5
+        score += 1
 
-    # MARKET CAP - max 20
-    # Small enough to have upside, but not microscopic.
-    if 50000 <= market_cap <= 250000:
-        score += 20
-    elif 25000 <= market_cap < 50000:
-        score += 15
-    elif 250000 < market_cap <= 500000:
-        score += 10
-    elif 10000 <= market_cap < 25000:
-        score += 5
+    # Small market cap
+    if 0 < market_cap <= 100000:
+        score += 2
+    elif market_cap <= 500000:
+        score += 1
 
-    # 5 MIN VOLUME - max 25
-    if volume_5m >= 50000:
-        score += 25
-    elif volume_5m >= 20000:
-        score += 20
-    elif volume_5m >= 10000:
-        score += 15
+    # Early volume
+    if volume_5m >= 10000:
+        score += 3
     elif volume_5m >= 5000:
-        score += 10
-    elif volume_5m >= 2000:
-        score += 5
+        score += 2
+    elif volume_5m >= 1000:
+        score += 1
 
-    # NUMBER OF TRADES - max 15
-    if trades_5m >= 100:
-        score += 15
-    elif trades_5m >= 50:
-        score += 12
-    elif trades_5m >= 25:
-        score += 8
-    elif trades_5m >= 10:
-        score += 4
+    # Trading activity
+    if trades_5m >= 50:
+        score += 2
+    elif trades_5m >= 20:
+        score += 1
 
-    # BUY PRESSURE - max 20
+    # Buy pressure
     total = buys_5m + sells_5m
 
     if total > 0:
         buy_ratio = buys_5m / total
 
-        if buy_ratio >= 0.75:
-            score += 20
-        elif buy_ratio >= 0.65:
-            score += 15
-        elif buy_ratio >= 0.58:
-            score += 10
-        elif buy_ratio >= 0.52:
-            score += 5
+        if buy_ratio >= 0.70:
+            score += 3
+        elif buy_ratio >= 0.60:
+            score += 2
+        elif buy_ratio >= 0.55:
+            score += 1
 
-    return min(score, 100)
+    return score
 
 
 def score_label(score):
-    if score >= 80:
-        return "🚨 VERY STRONG EARLY MOMENTUM"
-    elif score >= 65:
-        return "🔥 STRONG EARLY MOMENTUM"
-    elif score >= 50:
-        return "👀 WATCH CLOSELY"
-    else:
-        return "LOW SIGNAL"
+    if score >= 9:
+        return "🔥 VERY HIGH MOMENTUM"
+
+    if score >= 7:
+        return "🚀 HIGH MOMENTUM"
+
+    if score >= 5:
+        return "👀 MEDIUM MOMENTUM"
+
+    return "LOW SIGNAL"
 
 
 def check_new_tokens():
     url = "https://public-api.birdeye.so/defi/v2/tokens/new_listing"
 
+    # Keep this request minimal.
+    # meme_platform_enabled was removed because it was
+    # causing Birdeye to reject the request with HTTP 400.
     data = birdeye_get(
         url,
         {
-            "limit": 20,
-            "meme_platform_enabled": "true"
+            "limit": 20
         }
     )
 
@@ -159,19 +183,11 @@ def check_new_tokens():
             continue
 
         seen_tokens.add(address)
-
-        liquidity = float(token.get("liquidity") or 0)
-
-        if liquidity < MIN_LIQUIDITY:
-            continue
-
         new_tokens.append(token)
 
-    print("Passed liquidity filter:", len(new_tokens))
+    print("New tokens:", len(new_tokens))
 
-    for token in new_tokens[:MAX_TOKENS_TO_ANALYZE]:
-
-        time.sleep(DELAY_BETWEEN_REQUESTS)
+    for token in new_tokens[:MAX_TOKENS_PER_CYCLE]:
 
         address = token.get("address", "")
         name = token.get("name", "UNKNOWN")
@@ -183,38 +199,51 @@ def check_new_tokens():
             continue
 
         liquidity = float(overview.get("liquidity") or 0)
-        market_cap = float(overview.get("marketCap") or 0)
 
-        volume_5m = float(overview.get("v5mUSD") or 0)
-        trades_5m = int(overview.get("trade5m") or 0)
-        buys_5m = int(overview.get("buy5m") or 0)
-        sells_5m = int(overview.get("sell5m") or 0)
+        market_cap = float(
+            overview.get("marketCap")
+            or overview.get("mc")
+            or 0
+        )
 
-        if market_cap > 0 and market_cap > MAX_MARKET_CAP:
+        if liquidity < MIN_LIQUIDITY:
             continue
 
-        score = calculate_score(
-            liquidity,
-            market_cap,
-            volume_5m,
-            trades_5m,
-            buys_5m,
-            sells_5m
+        if market_cap > MAX_MARKET_CAP:
+            continue
+
+        score = calculate_score(overview)
+        signal = score_label(score)
+
+        volume_5m = float(
+            overview.get("v5mUSD")
+            or overview.get("volume5m")
+            or 0
         )
 
-        label = score_label(score)
+        trades_5m = int(
+            overview.get("trade5m")
+            or overview.get("trades5m")
+            or 0
+        )
 
-        total = buys_5m + sells_5m
-        buy_percentage = (
-            round((buys_5m / total) * 100, 1)
-            if total > 0 else 0
+        buys_5m = int(
+            overview.get("buy5m")
+            or overview.get("buys5m")
+            or 0
+        )
+
+        sells_5m = int(
+            overview.get("sell5m")
+            or overview.get("sells5m")
+            or 0
         )
 
         print("")
-        print("=" * 45)
-        print(label)
-        print("SCORE:", score, "/ 100")
-        print("")
+        print("================================")
+        print(signal)
+        print("EARLY TOKEN WATCH")
+        print("Score:", score)
         print("Name:", name)
         print("Symbol:", symbol)
         print("Liquidity: $", round(liquidity, 2))
@@ -222,9 +251,8 @@ def check_new_tokens():
         print("Volume 5m: $", round(volume_5m, 2))
         print("Trades 5m:", trades_5m)
         print("Buys/Sells 5m:", buys_5m, "/", sells_5m)
-        print("Buy pressure:", buy_percentage, "%")
         print("Address:", address)
-        print("=" * 45)
+        print("================================")
         print("")
 
 
@@ -232,4 +260,4 @@ print("Solana EARLY MOMENTUM SCORE monitor started")
 
 while True:
     check_new_tokens()
-    time.sleep(CHECK_EVERY_SECONDS)
+    time.sleep(CHECK_INTERVAL)

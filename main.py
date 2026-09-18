@@ -28,13 +28,32 @@ def get_telegram_chat_id():
         if data.get("ok") and data.get("result"):
             chat_id = data["result"][-1]["message"]["chat"]["id"]
             print("TELEGRAM CHAT ID:", chat_id)
+            return chat_id
         else:
             print("No Telegram messages found")
 
     except Exception as e:
         print("Telegram Chat ID error:", e)
 
+def send_telegram_message(chat_id, message):
+    if not TELEGRAM_BOT_TOKEN or not chat_id:
+        return
 
+    try:
+        url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
+        response = requests.post(
+            url,
+            data={
+                "chat_id": chat_id,
+                "text": message
+            },
+            timeout=20
+        )
+        response.raise_for_status()
+        print("Telegram alert sent")
+
+    except Exception as e:
+        print("Telegram send error:", e)
 
 
 # ---------------- FILTERS ----------------
@@ -574,7 +593,7 @@ print("Selling pressure filter: ACTIVE")
 print("Checking every 60 seconds")
 print("========================================")
 print("")
-get_telegram_chat_id()
+TELEGRAM_CHAT_ID = get_telegram_chat_id()
 while True:
 
     monitor()

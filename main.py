@@ -574,7 +574,11 @@ def monitor():
             "Pool address:",
             pool_address
         )
-
+            if score >= 12:
+                send_telegram_message(
+                    TELEGRAM_CHAT_ID,
+                    f"🚀 SOLANA ALERT\nScore: {score}/18\nPool: {pool_address}"
+                )
         print("========================================")
         print("")
 

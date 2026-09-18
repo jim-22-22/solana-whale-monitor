@@ -14,6 +14,7 @@ HEADERS = {
 }
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 CHECK_INTERVAL = 60
+print("Telegram token loaded:", bool(TELEGRAM_BOT_TOKEN))
 def get_telegram_chat_id():
     if not TELEGRAM_BOT_TOKEN:
         print("Telegram bot token not found")

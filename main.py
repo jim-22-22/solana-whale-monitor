@@ -1,7 +1,7 @@
 import time
 from datetime import datetime, timezone
 import requests
-
+import os
 # =====================================================
 # SOLANA EARLY PUMP / MOMENTUM MONITOR
 # Source: GeckoTerminal
@@ -12,8 +12,29 @@ URL = "https://api.geckoterminal.com/api/v2/networks/solana/new_pools"
 HEADERS = {
     "Accept": "application/json;version=20230203"
 }
-
+TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 CHECK_INTERVAL = 60
+def get_telegram_chat_id():
+    if not TELEGRAM_BOT_TOKEN:
+        print("Telegram bot token not found")
+        return
+
+    try:
+        url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/getUpdates"
+        response = requests.get(url, timeout=20)
+        data = response.json()
+
+        if data.get("ok") and data.get("result"):
+            chat_id = data["result"][-1]["message"]["chat"]["id"]
+            print("TELEGRAM CHAT ID:", chat_id)
+        else:
+            print("No Telegram messages found")
+
+    except Exception as e:
+        print("Telegram Chat ID error:", e)
+
+
+
 
 # ---------------- FILTERS ----------------
 
@@ -552,7 +573,7 @@ print("Selling pressure filter: ACTIVE")
 print("Checking every 60 seconds")
 print("========================================")
 print("")
-
+get_telegram_chat_id()
 while True:
 
     monitor()

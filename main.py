@@ -30,7 +30,7 @@ MIN_TRADES_5M = 5
 
 MIN_ALERT_SCORE = 6
 
-# We only calculate acceleration after enough history exists
+# Don't calculate acceleration until enough history exists
 MIN_AGE_FOR_ACCELERATION = 10
 
 seen_pools = set()
@@ -114,11 +114,12 @@ def calculate_score(
     sells_1h
 ):
     score = 0
+    penalties = 0
 
     trades_5m = buys_5m + sells_5m
     trades_1h = buys_1h + sells_1h
 
-    # ---------------- AGE: max 3 ----------------
+    # ---------------- AGE: max +3 ----------------
 
     if age <= 3:
         score += 3
@@ -127,21 +128,21 @@ def calculate_score(
     elif age <= 30:
         score += 1
 
-    # ---------------- LIQUIDITY: max 2 ----------------
+    # ---------------- LIQUIDITY: max +2 ----------------
 
     if 10000 <= liquidity <= 75000:
         score += 2
     elif liquidity >= 5000:
         score += 1
 
-    # ---------------- FDV: max 2 ----------------
+    # ---------------- FDV: max +2 ----------------
 
     if 20000 <= fdv <= 150000:
         score += 2
     elif 0 < fdv <= 500000:
         score += 1
 
-    # ---------------- VOLUME 5M: max 3 ----------------
+    # ---------------- VOLUME 5M: max +3 ----------------
 
     if volume_5m >= 10000:
         score += 3
@@ -150,34 +151,52 @@ def calculate_score(
     elif volume_5m >= 500:
         score += 1
 
-    # ---------------- TRADES 5M: max 2 ----------------
+    # ---------------- TRADES 5M: max +2 ----------------
 
     if trades_5m >= 50:
         score += 2
     elif trades_5m >= 15:
         score += 1
 
-    # ---------------- BUY PRESSURE: max 3 ----------------
+    # =================================================
+    # BUY / SELL PRESSURE
+    #
+    # Strong buying = bonus
+    # Strong selling = penalty
+    # =================================================
 
     buy_ratio = 0
 
     if trades_5m > 0:
         buy_ratio = buys_5m / trades_5m
 
+        # BUYING BONUS
+
         if buy_ratio >= 0.70:
             score += 3
+
         elif buy_ratio >= 0.60:
             score += 2
+
         elif buy_ratio >= 0.55:
             score += 1
 
+        # SELLING PENALTY
+
+        elif buy_ratio < 0.35:
+            penalties += 4
+
+        elif buy_ratio < 0.40:
+            penalties += 3
+
+        elif buy_ratio < 0.45:
+            penalties += 2
+
+        elif buy_ratio < 0.50:
+            penalties += 1
+
     # =================================================
     # ACCELERATION
-    #
-    # IMPORTANT:
-    # Do NOT calculate acceleration for brand-new pools.
-    # Otherwise h1 and m5 can contain nearly the same
-    # activity and create the fake 12x signal.
     # =================================================
 
     volume_acceleration = None
@@ -185,43 +204,59 @@ def calculate_score(
 
     if age >= MIN_AGE_FOR_ACCELERATION:
 
-        # Estimate how many 5-minute periods the pool
-        # has actually been alive, capped at 12.
         periods_alive = min(
             12,
             max(2, age / 5)
         )
 
+        # ---------------- VOLUME ACCELERATION ----------------
+
         if volume_1h > 0:
+
             average_volume = volume_1h / periods_alive
 
             if average_volume > 0:
+
                 volume_acceleration = (
                     volume_5m / average_volume
                 )
 
                 if volume_acceleration >= 3:
                     score += 3
+
                 elif volume_acceleration >= 2:
                     score += 2
+
                 elif volume_acceleration >= 1.3:
                     score += 1
 
+        # ---------------- TRADE ACCELERATION ----------------
+
         if trades_1h > 0:
+
             average_trades = trades_1h / periods_alive
 
             if average_trades > 0:
+
                 trade_acceleration = (
                     trades_5m / average_trades
                 )
 
                 if trade_acceleration >= 2.5:
                     score += 2
+
                 elif trade_acceleration >= 1.5:
                     score += 1
 
+    # Apply selling penalties at the end
+
+    raw_score = score
+    final_score = max(0, score - penalties)
+
     return {
-        "score": score,
+        "score": final_score,
+        "raw_score": raw_score,
+        "penalties": penalties,
         "buy_ratio": buy_ratio,
         "volume_acceleration": volume_acceleration,
         "trade_acceleration": trade_acceleration
@@ -229,6 +264,7 @@ def calculate_score(
 
 
 def score_label(score):
+
     if score >= 15:
         return "🚨🚨 EXTREME EARLY MOMENTUM"
 
@@ -245,6 +281,7 @@ def score_label(score):
 
 
 def monitor():
+
     data = get_new_pools()
 
     if not data:
@@ -257,6 +294,7 @@ def monitor():
     candidates = 0
 
     for pool in pools:
+
         attributes = pool.get("attributes", {})
 
         pool_address = attributes.get("address", "")
@@ -293,6 +331,8 @@ def monitor():
             attributes.get("market_cap_usd")
         )
 
+        # ---------------- VOLUME ----------------
+
         volume = attributes.get(
             "volume_usd",
             {}
@@ -305,6 +345,8 @@ def monitor():
         volume_1h = safe_float(
             volume.get("h1")
         )
+
+        # ---------------- TRANSACTIONS ----------------
 
         transactions = attributes.get(
             "transactions",
@@ -342,6 +384,8 @@ def monitor():
 
         if trades_5m < MIN_TRADES_5M:
             continue
+
+        # ---------------- SCORE ----------------
 
         result = calculate_score(
             age,
@@ -382,7 +426,12 @@ def monitor():
         print("========================================")
 
         print("Pool:", name)
-        print("Age:", round(age, 1), "minutes")
+
+        print(
+            "Age:",
+            round(age, 1),
+            "minutes"
+        )
 
         print(
             "Liquidity: $",
@@ -427,12 +476,27 @@ def monitor():
             "%"
         )
 
+        # Show selling penalty
+
+        if result["penalties"] > 0:
+            print(
+                "⚠️ Selling pressure penalty:",
+                "-",
+                result["penalties"],
+                "points"
+            )
+
+        # Show acceleration
+
         if volume_acceleration is None:
+
             print(
                 "Volume acceleration: N/A "
                 "(pool too new)"
             )
+
         else:
+
             print(
                 "Volume acceleration:",
                 round(volume_acceleration, 2),
@@ -440,11 +504,14 @@ def monitor():
             )
 
         if trade_acceleration is None:
+
             print(
                 "Trade acceleration: N/A "
                 "(pool too new)"
             )
+
         else:
+
             print(
                 "Trade acceleration:",
                 round(trade_acceleration, 2),
@@ -452,7 +519,12 @@ def monitor():
             )
 
         print(
-            "MOMENTUM SCORE:",
+            "Raw score:",
+            result["raw_score"]
+        )
+
+        print(
+            "FINAL MOMENTUM SCORE:",
             score,
             "/ 18"
         )
@@ -475,11 +547,14 @@ print("")
 print("========================================")
 print("SOLANA EARLY PUMP MONITOR STARTED")
 print("Source: GeckoTerminal")
-print("Fake 12x acceleration fix: ACTIVE")
+print("Fake 12x fix: ACTIVE")
+print("Selling pressure filter: ACTIVE")
 print("Checking every 60 seconds")
 print("========================================")
 print("")
 
 while True:
+
     monitor()
+
     time.sleep(CHECK_INTERVAL)
